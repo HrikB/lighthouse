@@ -73,6 +73,7 @@ use tokio::sync::{
     mpsc::{Sender, UnboundedSender},
     oneshot,
 };
+use types::beacon_state_copy::BeaconState2;
 use tokio_stream::{
     wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
     StreamExt,
@@ -2614,6 +2615,72 @@ pub fn serve<T: BeaconChainTypes>(
             },
         );
 
+    // GET debug2/beacon/states/{state_id}
+    let get_debug_beacon_states2 = any_version
+        .and(warp::path("debug2"))
+        .and(warp::path("beacon"))
+        .and(warp::path("states"))
+        .and(warp::path::param::<StateId>().or_else(|_| async {
+            Err(warp_utils::reject::custom_bad_request(
+                "Invalid state ID".to_string(),
+            ))
+        }))
+        .and(warp::path::end())
+        .and(warp::header::optional::<api_types::Accept>("accept"))
+        .and(task_spawner_filter.clone())
+        .and(chain_filter.clone())
+        .then(
+            |endpoint_version: EndpointVersion,
+             state_id: StateId,
+             accept_header: Option<api_types::Accept>,
+             task_spawner: TaskSpawner<T::EthSpec>,
+             chain: Arc<BeaconChain<T>>| {
+                task_spawner.blocking_response_task(Priority::P1, move || match accept_header {
+                    Some(api_types::Accept::Ssz) => {
+                        // We can ignore the optimistic status for the "fork" since it's a
+                        // specification constant that doesn't change across competing heads of the
+                        // beacon chain.
+                        let (state, _execution_optimistic, _finalized) = state_id.state(&chain)?;
+                        let fork_name = state
+                            .fork_name(&chain.spec)
+                            .map_err(inconsistent_fork_rejection)?;
+                        Response::builder()
+                            .status(200)
+                            .body(BeaconState2::from_ref(&state).as_ssz_bytes().into())
+                            .map(|res: Response<Body>| add_ssz_content_type_header(res))
+                            .map(|resp: warp::reply::Response| {
+                                add_consensus_version_header(resp, fork_name)
+                            })
+                            .map_err(|e| {
+                                warp_utils::reject::custom_server_error(format!(
+                                    "failed to create response: {}",
+                                    e
+                                ))
+                            })
+                    }
+                    _ => state_id.map_state_and_execution_optimistic_and_finalized(
+                        &chain,
+                        |state, execution_optimistic, finalized| {
+                            let fork_name = state
+                                .fork_name(&chain.spec)
+                                .map_err(inconsistent_fork_rejection)?;
+                            let res = execution_optimistic_finalized_fork_versioned_response(
+                                endpoint_version,
+                                fork_name,
+                                execution_optimistic,
+                                finalized,
+                                BeaconState2::from_ref(&state),
+                            )?;
+                            Ok(add_consensus_version_header(
+                                warp::reply::json(&res).into_response(),
+                                fork_name,
+                            ))
+                        },
+                    ),
+                })
+            },
+        );
+
     // GET debug/beacon/heads
     let get_debug_beacon_heads = any_version
         .and(warp::path("debug"))
@@ -4484,6 +4551,7 @@ pub fn serve<T: BeaconChainTypes>(
                 .uor(get_config_spec)
                 .uor(get_config_deposit_contract)
                 .uor(get_debug_beacon_states)
+                .uor(get_debug_beacon_states2)
                 .uor(get_debug_beacon_heads)
                 .uor(get_debug_fork_choice)
                 .uor(get_node_identity)

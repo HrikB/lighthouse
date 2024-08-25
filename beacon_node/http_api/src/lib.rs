@@ -60,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use slog::{crit, debug, error, info, warn, Logger};
 use slot_clock::SlotClock;
 use ssz::Encode;
+use ssz_rs::{GeneralizedIndexable, HashTreeRoot, MerkleizationError, PathElement, Prove};
 pub use state_id::StateId;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -73,11 +74,11 @@ use tokio::sync::{
     mpsc::{Sender, UnboundedSender},
     oneshot,
 };
-use types::beacon_state_copy::BeaconState2;
 use tokio_stream::{
     wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
     StreamExt,
 };
+use types::beacon_state_copy::BeaconState2;
 use types::{
     fork_versioned_response::EmptyMetadata, Attestation, AttestationData, AttestationShufflingId,
     AttesterSlashing, BeaconStateError, CommitteeCache, ConfigAndPreset, Epoch, EthSpec, ForkName,
@@ -2636,47 +2637,26 @@ pub fn serve<T: BeaconChainTypes>(
              task_spawner: TaskSpawner<T::EthSpec>,
              chain: Arc<BeaconChain<T>>| {
                 task_spawner.blocking_response_task(Priority::P1, move || match accept_header {
-                    Some(api_types::Accept::Ssz) => {
-                        // We can ignore the optimistic status for the "fork" since it's a
-                        // specification constant that doesn't change across competing heads of the
-                        // beacon chain.
-                        let (state, _execution_optimistic, _finalized) = state_id.state(&chain)?;
-                        let fork_name = state
+                    Some(api_types::Accept::Ssz) => panic!("JSON Only"),
+                    _ => {
+                        let (state_, _execution_optimistic, _finalized) = state_id.state(&chain)?;
+                        let fork_name = state_
                             .fork_name(&chain.spec)
                             .map_err(inconsistent_fork_rejection)?;
-                        Response::builder()
-                            .status(200)
-                            .body(BeaconState2::from_ref(&state).as_ssz_bytes().into())
-                            .map(|res: Response<Body>| add_ssz_content_type_header(res))
-                            .map(|resp: warp::reply::Response| {
-                                add_consensus_version_header(resp, fork_name)
-                            })
-                            .map_err(|e| {
-                                warp_utils::reject::custom_server_error(format!(
-                                    "failed to create response: {}",
-                                    e
-                                ))
-                            })
+                        let state = BeaconState2::from(state_);
+
+                        let path = &[
+                            PathElement::Field("latest_execution_payload_header".to_owned()),
+                            PathElement::Field("block_hash".to_owned()),
+                        ];
+
+                        let (proof, witness) = state.as_deneb().unwrap().prove(path).unwrap();
+
+                        Ok(add_consensus_version_header(
+                            warp::reply::json(&_execution_optimistic).into_response(),
+                            fork_name,
+                        ))
                     }
-                    _ => state_id.map_state_and_execution_optimistic_and_finalized(
-                        &chain,
-                        |state, execution_optimistic, finalized| {
-                            let fork_name = state
-                                .fork_name(&chain.spec)
-                                .map_err(inconsistent_fork_rejection)?;
-                            let res = execution_optimistic_finalized_fork_versioned_response(
-                                endpoint_version,
-                                fork_name,
-                                execution_optimistic,
-                                finalized,
-                                BeaconState2::from_ref(&state),
-                            )?;
-                            Ok(add_consensus_version_header(
-                                warp::reply::json(&res).into_response(),
-                                fork_name,
-                            ))
-                        },
-                    ),
                 })
             },
         );

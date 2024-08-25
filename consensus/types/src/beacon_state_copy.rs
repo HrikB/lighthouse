@@ -1,38 +1,34 @@
-use crate::historical_summary::HistoricalSummary;
-use crate::test_utils::TestRandom;
 use crate::*;
-use compare_fields_derive::CompareFields;
 use derivative::Derivative;
 pub use eth_spec::*;
+use ethereum_consensus::{
+    altair::Fork,
+    bellatrix,
+    capella::{self, HistoricalSummary},
+    deneb::{
+        self,
+        mainnet::{
+            BYTES_PER_LOGS_BLOOM, HISTORICAL_ROOTS_LIMIT, MAX_EXTRA_DATA_BYTES,
+            SLOTS_PER_HISTORICAL_ROOT,
+        },
+    },
+    phase0::{beacon_block::BeaconBlockHeader, U256},
+    primitives::{Root, Slot},
+    ssz::prelude::{List, Vector},
+};
 use metastruct::metastruct;
-pub use milhouse::{interface::Interface, List, Vector};
-use serde::{Deserialize, Serialize};
-use ssz_derive::{Decode, Encode};
+pub use milhouse::interface::Interface;
+use ssz_rs::{GeneralizedIndexable, HashTreeRoot, MerkleizationError, PathElement};
+use ssz_rs_derive::SimpleSerialize;
 use superstruct::superstruct;
-use test_random_derive::TestRandom;
 use tree_hash::TreeHash;
-use tree_hash_derive::TreeHash;
 
 /// The state of the `BeaconChain` at some slot.
 #[superstruct(
     variants(Base, Altair, Bellatrix, Capella, Deneb, Electra),
     variant_attributes(
-        derive(
-            Derivative,
-            Debug,
-            PartialEq,
-            Serialize,
-            Deserialize,
-            Encode,
-            Decode,
-            TreeHash,
-            TestRandom,
-            CompareFields,
-            arbitrary::Arbitrary,
-        ),
-        serde(bound = "E: EthSpec", deny_unknown_fields),
-        arbitrary(bound = "E: EthSpec"),
-        derivative(Clone),
+        derive(Derivative, Debug, PartialEq, SimpleSerialize),
+        derivative(Clone)
     ),
     specific_variant_attributes(
         Base(metastruct(
@@ -128,26 +124,15 @@ use tree_hash_derive::TreeHash;
     partial_getter_error(ty = "Error", expr = "Error::IncorrectStateVariant"),
     map_ref_mut_into(BeaconStateRef)
 )]
-#[derive(
-    Debug, PartialEq, Clone, Serialize, Deserialize, Encode, TreeHash, arbitrary::Arbitrary,
-)]
-#[serde(untagged)]
-#[serde(bound = "E: EthSpec")]
-#[arbitrary(bound = "E: EthSpec")]
-#[tree_hash(enum_behaviour = "transparent")]
-#[ssz(enum_behaviour = "transparent")]
-pub struct BeaconState2<E>
-where
-    E: EthSpec,
-{
+#[derive(Debug, PartialEq, Clone)]
+pub struct BeaconState2 {
     // Versioning
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
     pub genesis_time: u64,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub genesis_validators_root: Hash256,
+    pub genesis_validators_root: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
     pub slot: Slot,
@@ -160,85 +145,79 @@ where
     pub latest_block_header: BeaconBlockHeader,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub block_roots: Hash256,
-    #[test_random(default)]
-    #[compare_fields(as_iter)]
-    pub state_roots: Vector<Hash256, E::SlotsPerHistoricalRoot>,
+    pub block_roots: Root,
+    pub state_roots: Vector<Root, SLOTS_PER_HISTORICAL_ROOT>,
     // Frozen in Capella, replaced by historical_summaries
-    #[test_random(default)]
-    #[compare_fields(as_iter)]
-    pub historical_roots: List<Hash256, E::HistoricalRootsLimit>,
+    pub historical_roots: List<Root, HISTORICAL_ROOTS_LIMIT>,
 
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub eth1_data: Hash256,
+    pub eth1_data: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub eth1_data_votes: Hash256,
+    pub eth1_data_votes: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
     pub eth1_deposit_index: u64,
 
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub validators: Hash256,
+    pub validators: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub balances: Hash256,
+    pub balances: Root,
 
     // Randomness
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub randao_mixes: Hash256,
+    pub randao_mixes: Root,
 
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub slashings: Hash256,
+    pub slashings: Root,
 
     // Attestations (genesis fork only)
     #[superstruct(only(Base))]
     #[metastruct(exclude_from(tree_lists))]
-    pub previous_epoch_attestations: Hash256,
+    pub previous_epoch_attestations: Root,
     #[superstruct(only(Base))]
     #[metastruct(exclude_from(tree_lists))]
-    pub current_epoch_attestations: Hash256,
+    pub current_epoch_attestations: Root,
 
     // Participation (Altair and later)
     #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
     #[metastruct(exclude_from(tree_lists))]
-    pub previous_epoch_participation: Hash256,
+    pub previous_epoch_participation: Root,
     #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
     #[metastruct(exclude_from(tree_lists))]
-    pub current_epoch_participation: Hash256,
+    pub current_epoch_participation: Root,
 
     // Finality
-    #[test_random(default)]
     #[metastruct(exclude_from(tree_lists))]
-    pub justification_bits: Hash256,
+    pub justification_bits: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub previous_justified_checkpoint: Hash256,
+    pub previous_justified_checkpoint: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub current_justified_checkpoint: Hash256,
+    pub current_justified_checkpoint: Root,
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub finalized_checkpoint: Hash256,
+    pub finalized_checkpoint: Root,
 
     // Inactivity
     #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
     #[superstruct(getter(copy))]
     #[metastruct(exclude_from(tree_lists))]
-    pub inactivity_scores: Hash256,
+    pub inactivity_scores: Root,
 
     // Light-client sync committees
     #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
     #[metastruct(exclude_from(tree_lists))]
-    pub current_sync_committee: Hash256,
+    pub current_sync_committee: Root,
     #[superstruct(only(Altair, Bellatrix, Capella, Deneb, Electra))]
     #[metastruct(exclude_from(tree_lists))]
-    pub next_sync_committee: Hash256,
+    pub next_sync_committee: Root,
 
     // Execution
     #[superstruct(
@@ -246,213 +225,661 @@ where
         partial_getter(rename = "latest_execution_payload_header_bellatrix")
     )]
     #[metastruct(exclude_from(tree_lists))]
-    pub latest_execution_payload_header: ExecutionPayloadHeaderBellatrix<E>,
+    pub latest_execution_payload_header:
+        bellatrix::ExecutionPayloadHeader<BYTES_PER_LOGS_BLOOM, MAX_EXTRA_DATA_BYTES>,
     #[superstruct(
         only(Capella),
         partial_getter(rename = "latest_execution_payload_header_capella")
     )]
     #[metastruct(exclude_from(tree_lists))]
-    pub latest_execution_payload_header: ExecutionPayloadHeaderCapella<E>,
+    pub latest_execution_payload_header:
+        capella::ExecutionPayloadHeader<BYTES_PER_LOGS_BLOOM, MAX_EXTRA_DATA_BYTES>,
     #[superstruct(
         only(Deneb),
         partial_getter(rename = "latest_execution_payload_header_deneb")
     )]
     #[metastruct(exclude_from(tree_lists))]
-    pub latest_execution_payload_header: ExecutionPayloadHeaderDeneb<E>,
-    #[superstruct(
-        only(Electra),
-        partial_getter(rename = "latest_execution_payload_header_electra")
-    )]
-    #[metastruct(exclude_from(tree_lists))]
-    pub latest_execution_payload_header: ExecutionPayloadHeaderElectra<E>,
+    pub latest_execution_payload_header:
+        deneb::ExecutionPayloadHeader<BYTES_PER_LOGS_BLOOM, MAX_EXTRA_DATA_BYTES>,
+    // #[superstruct(
+    //     only(Electra),
+    //     partial_getter(rename = "latest_execution_payload_header_electra")
+    // )]
+    // #[metastruct(exclude_from(tree_lists))]
+    // pub latest_execution_payload_header: ExecutionPayloadHeaderElectra<E>,
 
     // Capella
     #[superstruct(only(Capella, Deneb, Electra), partial_getter(copy))]
-    #[serde(with = "serde_utils::quoted_u64")]
     #[metastruct(exclude_from(tree_lists))]
     pub next_withdrawal_index: u64,
     #[superstruct(only(Capella, Deneb, Electra), partial_getter(copy))]
-    #[serde(with = "serde_utils::quoted_u64")]
     #[metastruct(exclude_from(tree_lists))]
     pub next_withdrawal_validator_index: u64,
     // Deep history valid from Capella onwards.
     #[superstruct(only(Capella, Deneb, Electra))]
-    #[test_random(default)]
-    pub historical_summaries: List<HistoricalSummary, E::HistoricalRootsLimit>,
-
+    pub historical_summaries: List<HistoricalSummary, HISTORICAL_ROOTS_LIMIT>,
     // Electra
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub deposit_receipts_start_index: u64,
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub deposit_balance_to_consume: u64,
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub exit_balance_to_consume: u64,
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    pub earliest_exit_epoch: Epoch,
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    #[serde(with = "serde_utils::quoted_u64")]
-    pub consolidation_balance_to_consume: u64,
-    #[superstruct(only(Electra), partial_getter(copy))]
-    #[metastruct(exclude_from(tree_lists))]
-    pub earliest_consolidation_epoch: Epoch,
-    #[test_random(default)]
-    #[superstruct(only(Electra))]
-    pub pending_balance_deposits: List<PendingBalanceDeposit, E::PendingBalanceDepositsLimit>,
-    #[test_random(default)]
-    #[superstruct(only(Electra))]
-    pub pending_partial_withdrawals:
-        List<PendingPartialWithdrawal, E::PendingPartialWithdrawalsLimit>,
-    #[test_random(default)]
-    #[superstruct(only(Electra))]
-    pub pending_consolidations: List<PendingConsolidation, E::PendingConsolidationsLimit>,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // #[serde(with = "serde_utils::quoted_u64")]
+    // pub deposit_receipts_start_index: u64,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // #[serde(with = "serde_utils::quoted_u64")]
+    // pub deposit_balance_to_consume: u64,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // #[serde(with = "serde_utils::quoted_u64")]
+    // pub exit_balance_to_consume: u64,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // pub earliest_exit_epoch: Epoch,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // #[serde(with = "serde_utils::quoted_u64")]
+    // pub consolidation_balance_to_consume: u64,
+    // #[superstruct(only(Electra), partial_getter(copy))]
+    // #[metastruct(exclude_from(tree_lists))]
+    // pub earliest_consolidation_epoch: Epoch,
+    // #[test_random(default)]
+    // #[superstruct(only(Electra))]
+    // pub pending_balance_deposits: List<PendingBalanceDeposit, E::PendingBalanceDepositsLimit>,
+    // #[test_random(default)]
+    // #[superstruct(only(Electra))]
+    // pub pending_partial_withdrawals:
+    //     List<PendingPartialWithdrawal, E::PendingPartialWithdrawalsLimit>,
+    // #[test_random(default)]
+    // #[superstruct(only(Electra))]
+    // pub pending_consolidations: List<PendingConsolidation, E::PendingConsolidationsLimit>,
 }
 
-impl<E: EthSpec> BeaconState2<E> {
-    pub fn from_ref(state: &BeaconState<E>) -> Self {
+impl<E: EthSpec> From<BeaconState<E>> for BeaconState2 {
+    fn from(state: BeaconState<E>) -> Self {
         match state {
             BeaconState::Base(state) => BeaconState2::Base(BeaconState2Base {
                 genesis_time: state.genesis_time,
-                genesis_validators_root: state.genesis_validators_root,
-                slot: state.slot,
-                fork: state.fork,
-                latest_block_header: state.latest_block_header.clone(),
-                block_roots: state.block_roots.tree_hash_root(),
-                state_roots: state.state_roots.clone(),
-                historical_roots: state.historical_roots.clone(),
-                eth1_data: state.eth1_data.tree_hash_root(),
-                eth1_data_votes: state.eth1_data_votes.tree_hash_root(),
+                genesis_validators_root: state.genesis_validators_root.0.into(),
+                slot: state.slot.into(),
+                fork: Fork {
+                    previous_version: state.fork.previous_version,
+                    current_version: state.fork.current_version,
+                    epoch: state.fork.epoch.into(),
+                },
+                latest_block_header: BeaconBlockHeader {
+                    slot: state.latest_block_header.slot.into(),
+                    proposer_index: state.latest_block_header.proposer_index as usize,
+                    parent_root: state.latest_block_header.parent_root.0.into(),
+                    state_root: state.latest_block_header.state_root.0.into(),
+                    body_root: state.latest_block_header.body_root.0.into(),
+                },
+                block_roots: state.block_roots.tree_hash_root().0.into(),
+                state_roots: Vector::try_from(
+                    state
+                        .state_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                historical_roots: List::try_from(
+                    state
+                        .historical_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                eth1_data: state.eth1_data.tree_hash_root().0.into(),
+                eth1_data_votes: state.eth1_data_votes.tree_hash_root().0.into(),
                 eth1_deposit_index: state.eth1_deposit_index,
-                validators: state.validators.tree_hash_root(),
-                balances: state.balances.tree_hash_root(),
-                randao_mixes: state.randao_mixes.tree_hash_root(),
-                slashings: state.slashings.tree_hash_root(),
-                previous_epoch_attestations: state.previous_epoch_attestations.tree_hash_root(),
-                current_epoch_attestations: state.current_epoch_attestations.tree_hash_root(),
-                justification_bits: state.justification_bits.tree_hash_root(),
-                previous_justified_checkpoint: state.previous_justified_checkpoint.tree_hash_root(),
-                current_justified_checkpoint: state.current_justified_checkpoint.tree_hash_root(),
-                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root(),
+                validators: state.validators.tree_hash_root().0.into(),
+                balances: state.balances.tree_hash_root().0.into(),
+                randao_mixes: state.randao_mixes.tree_hash_root().0.into(),
+                slashings: state.slashings.tree_hash_root().0.into(),
+                previous_epoch_attestations: state
+                    .previous_epoch_attestations
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_epoch_attestations: state
+                    .current_epoch_attestations
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                justification_bits: state.justification_bits.tree_hash_root().0.into(),
+                previous_justified_checkpoint: state
+                    .previous_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_justified_checkpoint: state
+                    .current_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root().0.into(),
             }),
             BeaconState::Altair(state) => BeaconState2::Altair(BeaconState2Altair {
                 genesis_time: state.genesis_time,
-                genesis_validators_root: state.genesis_validators_root,
-                slot: state.slot,
-                fork: state.fork,
-                latest_block_header: state.latest_block_header.clone(),
-                block_roots: state.block_roots.tree_hash_root(),
-                state_roots: state.state_roots.clone(),
-                historical_roots: state.historical_roots.clone(),
-                eth1_data: state.eth1_data.tree_hash_root(),
-                eth1_data_votes: state.eth1_data_votes.tree_hash_root(),
+                genesis_validators_root: state.genesis_validators_root.0.into(),
+                slot: state.slot.into(),
+                fork: Fork {
+                    previous_version: state.fork.previous_version,
+                    current_version: state.fork.current_version,
+                    epoch: state.fork.epoch.into(),
+                },
+                latest_block_header: BeaconBlockHeader {
+                    slot: state.latest_block_header.slot.into(),
+                    proposer_index: state.latest_block_header.proposer_index as usize,
+                    parent_root: state.latest_block_header.parent_root.0.into(),
+                    state_root: state.latest_block_header.state_root.0.into(),
+                    body_root: state.latest_block_header.body_root.0.into(),
+                },
+                block_roots: state.block_roots.tree_hash_root().0.into(),
+                state_roots: Vector::try_from(
+                    state
+                        .state_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                historical_roots: List::try_from(
+                    state
+                        .historical_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                eth1_data: state.eth1_data.tree_hash_root().0.into(),
+                eth1_data_votes: state.eth1_data_votes.tree_hash_root().0.into(),
                 eth1_deposit_index: state.eth1_deposit_index,
-                validators: state.validators.tree_hash_root(),
-                balances: state.balances.tree_hash_root(),
-                randao_mixes: state.randao_mixes.tree_hash_root(),
-                slashings: state.slashings.tree_hash_root(),
-                justification_bits: state.justification_bits.tree_hash_root(),
-                previous_justified_checkpoint: state.previous_justified_checkpoint.tree_hash_root(),
-                current_justified_checkpoint: state.current_justified_checkpoint.tree_hash_root(),
-                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root(),
-                current_epoch_participation: state.current_epoch_participation.tree_hash_root(),
-                previous_epoch_participation: state.previous_epoch_participation.tree_hash_root(),
-                current_sync_committee: state.current_sync_committee.tree_hash_root(),
-                next_sync_committee: state.next_sync_committee.tree_hash_root(),
-                inactivity_scores: state.inactivity_scores.tree_hash_root(),
+                validators: state.validators.tree_hash_root().0.into(),
+                balances: state.balances.tree_hash_root().0.into(),
+                randao_mixes: state.randao_mixes.tree_hash_root().0.into(),
+                slashings: state.slashings.tree_hash_root().0.into(),
+                justification_bits: state.justification_bits.tree_hash_root().0.into(),
+                previous_justified_checkpoint: state
+                    .previous_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_justified_checkpoint: state
+                    .current_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root().0.into(),
+                current_epoch_participation: state
+                    .current_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                previous_epoch_participation: state
+                    .previous_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_sync_committee: state.current_sync_committee.tree_hash_root().0.into(),
+                next_sync_committee: state.next_sync_committee.tree_hash_root().0.into(),
+                inactivity_scores: state.inactivity_scores.tree_hash_root().0.into(),
             }),
             BeaconState::Bellatrix(state) => BeaconState2::Bellatrix(BeaconState2Bellatrix {
                 genesis_time: state.genesis_time,
-                genesis_validators_root: state.genesis_validators_root,
-                slot: state.slot,
-                fork: state.fork,
-                latest_block_header: state.latest_block_header.clone(),
-                block_roots: state.block_roots.tree_hash_root(),
-                state_roots: state.state_roots.clone(),
-                historical_roots: state.historical_roots.clone(),
-                eth1_data: state.eth1_data.tree_hash_root(),
-                eth1_data_votes: state.eth1_data_votes.tree_hash_root(),
+                genesis_validators_root: state.genesis_validators_root.0.into(),
+                slot: state.slot.into(),
+                fork: Fork {
+                    previous_version: state.fork.previous_version,
+                    current_version: state.fork.current_version,
+                    epoch: state.fork.epoch.into(),
+                },
+                latest_block_header: BeaconBlockHeader {
+                    slot: state.latest_block_header.slot.into(),
+                    proposer_index: state.latest_block_header.proposer_index as usize,
+                    parent_root: state.latest_block_header.parent_root.0.into(),
+                    state_root: state.latest_block_header.state_root.0.into(),
+                    body_root: state.latest_block_header.body_root.0.into(),
+                },
+                block_roots: state.block_roots.tree_hash_root().0.into(),
+                state_roots: Vector::try_from(
+                    state
+                        .state_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                historical_roots: List::try_from(
+                    state
+                        .historical_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                eth1_data: state.eth1_data.tree_hash_root().0.into(),
+                eth1_data_votes: state.eth1_data_votes.tree_hash_root().0.into(),
                 eth1_deposit_index: state.eth1_deposit_index,
-                validators: state.validators.tree_hash_root(),
-                balances: state.balances.tree_hash_root(),
-                randao_mixes: state.randao_mixes.tree_hash_root(),
-                slashings: state.slashings.tree_hash_root(),
-                justification_bits: state.justification_bits.tree_hash_root(),
-                previous_justified_checkpoint: state.previous_justified_checkpoint.tree_hash_root(),
-                current_justified_checkpoint: state.current_justified_checkpoint.tree_hash_root(),
-                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root(),
-                current_epoch_participation: state.current_epoch_participation.tree_hash_root(),
-                previous_epoch_participation: state.previous_epoch_participation.tree_hash_root(),
-                current_sync_committee: state.current_sync_committee.tree_hash_root(),
-                next_sync_committee: state.next_sync_committee.tree_hash_root(),
-                inactivity_scores: state.inactivity_scores.tree_hash_root(),
-                latest_execution_payload_header: state.latest_execution_payload_header.clone(),
+                validators: state.validators.tree_hash_root().0.into(),
+                balances: state.balances.tree_hash_root().0.into(),
+                randao_mixes: state.randao_mixes.tree_hash_root().0.into(),
+                slashings: state.slashings.tree_hash_root().0.into(),
+                justification_bits: state.justification_bits.tree_hash_root().0.into(),
+                previous_justified_checkpoint: state
+                    .previous_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_justified_checkpoint: state
+                    .current_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root().0.into(),
+                current_epoch_participation: state
+                    .current_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                previous_epoch_participation: state
+                    .previous_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_sync_committee: state.current_sync_committee.tree_hash_root().0.into(),
+                next_sync_committee: state.next_sync_committee.tree_hash_root().0.into(),
+                inactivity_scores: state.inactivity_scores.tree_hash_root().0.into(),
+                latest_execution_payload_header: bellatrix::ExecutionPayloadHeader {
+                    parent_hash: state
+                        .latest_execution_payload_header
+                        .parent_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    fee_recipient: state
+                        .latest_execution_payload_header
+                        .fee_recipient
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    state_root: state
+                        .latest_execution_payload_header
+                        .state_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    receipts_root: state
+                        .latest_execution_payload_header
+                        .receipts_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    logs_bloom: state
+                        .latest_execution_payload_header
+                        .logs_bloom
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    prev_randao: state
+                        .latest_execution_payload_header
+                        .prev_randao
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    block_number: state.latest_execution_payload_header.block_number,
+                    gas_limit: state.latest_execution_payload_header.gas_limit,
+                    gas_used: state.latest_execution_payload_header.gas_used,
+                    timestamp: state.latest_execution_payload_header.timestamp,
+                    extra_data: state
+                        .latest_execution_payload_header
+                        .extra_data
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    base_fee_per_gas: U256::from_limbs(
+                        state.latest_execution_payload_header.base_fee_per_gas.0,
+                    ),
+                    block_hash: state
+                        .latest_execution_payload_header
+                        .block_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    transactions_root: state
+                        .latest_execution_payload_header
+                        .transactions_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                },
             }),
             BeaconState::Capella(state) => BeaconState2::Capella(BeaconState2Capella {
                 genesis_time: state.genesis_time,
-                genesis_validators_root: state.genesis_validators_root,
-                slot: state.slot,
-                fork: state.fork,
-                latest_block_header: state.latest_block_header.clone(),
-                block_roots: state.block_roots.tree_hash_root(),
-                state_roots: state.state_roots.clone(),
-                historical_roots: state.historical_roots.clone(),
-                eth1_data: state.eth1_data.tree_hash_root(),
-                eth1_data_votes: state.eth1_data_votes.tree_hash_root(),
+                genesis_validators_root: state.genesis_validators_root.0.into(),
+                slot: state.slot.into(),
+                fork: Fork {
+                    previous_version: state.fork.previous_version,
+                    current_version: state.fork.current_version,
+                    epoch: state.fork.epoch.into(),
+                },
+                latest_block_header: BeaconBlockHeader {
+                    slot: state.latest_block_header.slot.into(),
+                    proposer_index: state.latest_block_header.proposer_index as usize,
+                    parent_root: state.latest_block_header.parent_root.0.into(),
+                    state_root: state.latest_block_header.state_root.0.into(),
+                    body_root: state.latest_block_header.body_root.0.into(),
+                },
+                block_roots: state.block_roots.tree_hash_root().0.into(),
+                state_roots: Vector::try_from(
+                    state
+                        .state_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                historical_roots: List::try_from(
+                    state
+                        .historical_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                eth1_data: state.eth1_data.tree_hash_root().0.into(),
+                eth1_data_votes: state.eth1_data_votes.tree_hash_root().0.into(),
                 eth1_deposit_index: state.eth1_deposit_index,
-                validators: state.validators.tree_hash_root(),
-                balances: state.balances.tree_hash_root(),
-                randao_mixes: state.randao_mixes.tree_hash_root(),
-                slashings: state.slashings.tree_hash_root(),
-                justification_bits: state.justification_bits.tree_hash_root(),
-                previous_justified_checkpoint: state.previous_justified_checkpoint.tree_hash_root(),
-                current_justified_checkpoint: state.current_justified_checkpoint.tree_hash_root(),
-                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root(),
-                current_epoch_participation: state.current_epoch_participation.tree_hash_root(),
-                previous_epoch_participation: state.previous_epoch_participation.tree_hash_root(),
-                current_sync_committee: state.current_sync_committee.tree_hash_root(),
-                next_sync_committee: state.next_sync_committee.tree_hash_root(),
-                inactivity_scores: state.inactivity_scores.tree_hash_root(),
-                latest_execution_payload_header: state.latest_execution_payload_header.clone(),
+                validators: state.validators.tree_hash_root().0.into(),
+                balances: state.balances.tree_hash_root().0.into(),
+                randao_mixes: state.randao_mixes.tree_hash_root().0.into(),
+                slashings: state.slashings.tree_hash_root().0.into(),
+                justification_bits: state.justification_bits.tree_hash_root().0.into(),
+                previous_justified_checkpoint: state
+                    .previous_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_justified_checkpoint: state
+                    .current_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root().0.into(),
+                current_epoch_participation: state
+                    .current_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                previous_epoch_participation: state
+                    .previous_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_sync_committee: state.current_sync_committee.tree_hash_root().0.into(),
+                next_sync_committee: state.next_sync_committee.tree_hash_root().0.into(),
+                inactivity_scores: state.inactivity_scores.tree_hash_root().0.into(),
+                latest_execution_payload_header: capella::ExecutionPayloadHeader {
+                    parent_hash: state
+                        .latest_execution_payload_header
+                        .parent_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    fee_recipient: state
+                        .latest_execution_payload_header
+                        .fee_recipient
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    state_root: state
+                        .latest_execution_payload_header
+                        .state_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    receipts_root: state
+                        .latest_execution_payload_header
+                        .receipts_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    logs_bloom: state
+                        .latest_execution_payload_header
+                        .logs_bloom
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    prev_randao: state
+                        .latest_execution_payload_header
+                        .prev_randao
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    block_number: state.latest_execution_payload_header.block_number,
+                    gas_limit: state.latest_execution_payload_header.gas_limit,
+                    gas_used: state.latest_execution_payload_header.gas_used,
+                    timestamp: state.latest_execution_payload_header.timestamp,
+                    extra_data: state
+                        .latest_execution_payload_header
+                        .extra_data
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    base_fee_per_gas: U256::from_limbs(
+                        state.latest_execution_payload_header.base_fee_per_gas.0,
+                    ),
+                    block_hash: state
+                        .latest_execution_payload_header
+                        .block_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    transactions_root: state
+                        .latest_execution_payload_header
+                        .transactions_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    withdrawals_root: state
+                        .latest_execution_payload_header
+                        .withdrawals_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                },
                 next_withdrawal_index: state.next_withdrawal_index,
                 next_withdrawal_validator_index: state.next_withdrawal_validator_index,
-                historical_summaries: state.historical_summaries.clone(),
+                historical_summaries: List::try_from(
+                    state
+                        .historical_summaries
+                        .into_iter()
+                        .map(|x| HistoricalSummary {
+                            block_summary_root: x.block_summary_root.0.into(),
+                            state_summary_root: x.state_summary_root.0.into(),
+                        })
+                        .collect::<Vec<HistoricalSummary>>(),
+                )
+                .unwrap(),
             }),
             BeaconState::Deneb(state) => BeaconState2::Deneb(BeaconState2Deneb {
                 genesis_time: state.genesis_time,
-                genesis_validators_root: state.genesis_validators_root,
-                slot: state.slot,
-                fork: state.fork,
-                latest_block_header: state.latest_block_header.clone(),
-                block_roots: state.block_roots.tree_hash_root(),
-                state_roots: state.state_roots.clone(),
-                historical_roots: state.historical_roots.clone(),
-                eth1_data: state.eth1_data.tree_hash_root(),
-                eth1_data_votes: state.eth1_data_votes.tree_hash_root(),
+                genesis_validators_root: state.genesis_validators_root.0.into(),
+                slot: state.slot.into(),
+                fork: Fork {
+                    previous_version: state.fork.previous_version,
+                    current_version: state.fork.current_version,
+                    epoch: state.fork.epoch.into(),
+                },
+                latest_block_header: BeaconBlockHeader {
+                    slot: state.latest_block_header.slot.into(),
+                    proposer_index: state.latest_block_header.proposer_index as usize,
+                    parent_root: state.latest_block_header.parent_root.0.into(),
+                    state_root: state.latest_block_header.state_root.0.into(),
+                    body_root: state.latest_block_header.body_root.0.into(),
+                },
+                block_roots: state.block_roots.tree_hash_root().0.into(),
+                state_roots: Vector::try_from(
+                    state
+                        .state_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                historical_roots: List::try_from(
+                    state
+                        .historical_roots
+                        .into_iter()
+                        .map(|x| x.0.into())
+                        .collect::<Vec<Root>>(),
+                )
+                .unwrap(),
+                eth1_data: state.eth1_data.tree_hash_root().0.into(),
+                eth1_data_votes: state.eth1_data_votes.tree_hash_root().0.into(),
                 eth1_deposit_index: state.eth1_deposit_index,
-                validators: state.validators.tree_hash_root(),
-                balances: state.balances.tree_hash_root(),
-                randao_mixes: state.randao_mixes.tree_hash_root(),
-                slashings: state.slashings.tree_hash_root(),
-                justification_bits: state.justification_bits.tree_hash_root(),
-                previous_justified_checkpoint: state.previous_justified_checkpoint.tree_hash_root(),
-                current_justified_checkpoint: state.current_justified_checkpoint.tree_hash_root(),
-                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root(),
-                current_epoch_participation: state.current_epoch_participation.tree_hash_root(),
-                previous_epoch_participation: state.previous_epoch_participation.tree_hash_root(),
-                current_sync_committee: state.current_sync_committee.tree_hash_root(),
-                next_sync_committee: state.next_sync_committee.tree_hash_root(),
-                inactivity_scores: state.inactivity_scores.tree_hash_root(),
-                latest_execution_payload_header: state.latest_execution_payload_header.clone(),
+                validators: state.validators.tree_hash_root().0.into(),
+                balances: state.balances.tree_hash_root().0.into(),
+                randao_mixes: state.randao_mixes.tree_hash_root().0.into(),
+                slashings: state.slashings.tree_hash_root().0.into(),
+                justification_bits: state.justification_bits.tree_hash_root().0.into(),
+                previous_justified_checkpoint: state
+                    .previous_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_justified_checkpoint: state
+                    .current_justified_checkpoint
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                finalized_checkpoint: state.finalized_checkpoint.tree_hash_root().0.into(),
+                current_epoch_participation: state
+                    .current_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                previous_epoch_participation: state
+                    .previous_epoch_participation
+                    .tree_hash_root()
+                    .0
+                    .into(),
+                current_sync_committee: state.current_sync_committee.tree_hash_root().0.into(),
+                next_sync_committee: state.next_sync_committee.tree_hash_root().0.into(),
+                inactivity_scores: state.inactivity_scores.tree_hash_root().0.into(),
+                latest_execution_payload_header: deneb::ExecutionPayloadHeader {
+                    parent_hash: state
+                        .latest_execution_payload_header
+                        .parent_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    fee_recipient: state
+                        .latest_execution_payload_header
+                        .fee_recipient
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    state_root: state
+                        .latest_execution_payload_header
+                        .state_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    receipts_root: state
+                        .latest_execution_payload_header
+                        .receipts_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    logs_bloom: state
+                        .latest_execution_payload_header
+                        .logs_bloom
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    prev_randao: state
+                        .latest_execution_payload_header
+                        .prev_randao
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    block_number: state.latest_execution_payload_header.block_number,
+                    gas_limit: state.latest_execution_payload_header.gas_limit,
+                    gas_used: state.latest_execution_payload_header.gas_used,
+                    timestamp: state.latest_execution_payload_header.timestamp,
+                    extra_data: state
+                        .latest_execution_payload_header
+                        .extra_data
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                    base_fee_per_gas: U256::from_limbs(
+                        state.latest_execution_payload_header.base_fee_per_gas.0,
+                    ),
+                    block_hash: state
+                        .latest_execution_payload_header
+                        .block_hash
+                        .0
+                         .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    transactions_root: state
+                        .latest_execution_payload_header
+                        .transactions_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    withdrawals_root: state
+                        .latest_execution_payload_header
+                        .withdrawals_root
+                        .0
+                        .as_slice()
+                        .try_into()
+                        .unwrap(),
+                    blob_gas_used: state.latest_execution_payload_header.blob_gas_used,
+                    excess_blob_gas: state.latest_execution_payload_header.excess_blob_gas,
+                },
                 next_withdrawal_index: state.next_withdrawal_index,
                 next_withdrawal_validator_index: state.next_withdrawal_validator_index,
-                historical_summaries: state.historical_summaries.clone(),
+                historical_summaries: List::try_from(
+                    state
+                        .historical_summaries
+                        .into_iter()
+                        .map(|x| HistoricalSummary {
+                            block_summary_root: x.block_summary_root.0.into(),
+                            state_summary_root: x.state_summary_root.0.into(),
+                        })
+                        .collect::<Vec<HistoricalSummary>>(),
+                )
+                .unwrap(),
             }),
             BeaconState::Electra(state) => todo!(),
         }
